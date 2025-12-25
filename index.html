@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>AI対策：完全に自作のアニメーションGIF変換器</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; text-align: center; background: #f4f4f9; color: #333; }
+        .container { background: white; padding: 30px; border-radius: 15px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        #drop-area { border: 3px dashed #1da1f2; padding: 50px; border-radius: 15px; cursor: pointer; transition: 0.3s; }
+        #drop-area:hover { background: #eef; }
+        .hidden { display: none; }
+        #status { margin: 20px 0; font-weight: bold; color: #1da1f2; }
+        progress { width: 100%; height: 25px; }
+        #preview { max-width: 100%; border-radius: 8px; margin-top: 20px; }
+        .btn { display: block; padding: 15px; background: #1da1f2; color: white; text-decoration: none; border-radius: 30px; margin-top: 20px; font-weight: bold; border: none; width: 100%; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>🛡️ AI対策 アニメーションGIFメーカー</h2>
+    <p style="font-size: 0.8em; color: #666;">外部通信なし・1ファイル完結で動くGIFを生成</p>
+
+    <div id="input-section">
+        <div id="drop-area">ここに画像をドロップ<br><small>(PNG / JPEG / WebP)</small></div>
+        <input type="file" id="file-input" accept="image/*" style="display:none">
+    </div>
+
+    <div id="process-section" class="hidden">
+        <div id="status">処理を開始します...</div>
+        <progress id="progress" value="0" max="100"></progress>
+    </div>
+
+    <div id="result-area" class="hidden">
+        <img id="preview">
+        <div id="download-container"></div>
+        <button class="btn" style="background:#666;" onclick="location.reload()">別の画像を変換</button>
+    </div>
+</div>
+
+<script>
+// =========================================================================
+// GIFEncoder.js and LZWEncoder.js - Core GIF generation libraries
+// These are open-source and directly embedded to ensure no external dependencies.
+// =========================================================================
+
+// LZWEncoder.js
+var LZWEncoder = function(width, height, pixels, colorDepth) {
+    var EOF = -1;
+    var imgW = width;
+    var imgH = height;
+    var pixAry = pixels;
+    var initCodeSize = Math.max(2, colorDepth);
+    var accum = new Uint8Array(256);
+    var htab = new Int32Array(5003);
+    var codetab = new Int32Array(5003);
+    var htab_size = 5003;
+    var free_ent = 0;
+    var maxcode = 0;
+    var clear_flg = false;
+    var gInitBits;
+    var n_bits;
+    var cur_accum;
+    var cur_bits;
+    var a_count;
+    var maxbits = 12;
+    var maxmaxcode = 1 << maxbits;
+    var gOutfile;
+    var ClearCode;
+    var EOFCode;
+
+    function char_init() {
+        var i;
+        for (i = 0; i < htab_size; i++) htab[i] = -1;
+    }
+
+    function output(code) {
+        cur_accum &= ((1 << cur_bits) - 1);
+        if (cur_bits > 0) cur_accum |= (code << cur_bits);
+        else cur_accum = code;
+        cur_bits += n_bits;
+        while (cur_bits >= 8) {
+            char_out(cur_accum & 0xff);
+            cur_accum >>= 8;
+            cur_bits -= 8;
+        }
+        if (free_ent > maxcode || clear_flg) {
+            if (clear_flg) {
+                gOutfile.writeByte(ClearCode);
+                n_bits = gInitBits;
+                maxcode = (1 << n_bits) - 1;
+                free_ent = ClearCode + 2;
+                clear_flg = false;
+            } else {
+                n_bits++;
+                if (n_bits == maxbits) maxcode = maxmaxcode;
+                else maxcode = (1 << n_bits) - 1;
+            }
+        }
+        if (code == EOFCode) {
+            while (cur_bits > 0) {
+                char_out(cur_accum & 0xff);
+                cur_accum >>= 8;
+                cur_bits -= 8;
+            }
+        }
+    }
+
+    function cl_block() {
+        char_init();
+        free_ent = ClearCode + 2;
+        clear_flg = true;
+        output(ClearCode);
+    }
+
+    function cl_hash(hsize) {
+        for (var i = 0; i < hsize; ++i) htab[i] = -1;
+    }
+
+    function char_out(c) {
+        accum[a_count++] = c;
+        if (a_count >= 254) flush_char();
+    }
+
+    function flush_char() {
+        if (a_count > 0) {
+            gOutfile.writeByte(a_count);
+            gOutfile.writeBytes(accum, 0, a_count);
+            a_count = 0;
+        }
+    }
+
+    this.encode = function(outfile) {
+        gOutfile = outfile;
+        gInitBits = initCodeSize;
+        clear_flg = false;
+        n_bits = gInitBits;
+        maxcode = (1 << n_bits) - 1;
+        free_ent = ClearCode + 2;
+        char_init();
+        var ent = pixAry[0];
+        var hshift = 0;
+        for (var fcode = htab_size; fcode < 65536; fcode *= 2) ++hshift;
+        hshift = 8 - hshift; // set hash code range bound
+        var pixIx = 1;
+        var endPix = imgW * imgH;
+        output(ClearCode);
+        while (pixIx < endPix) {
+            var c = pixAry[pixIx++];
+            var fcode = (c << maxbits) + ent;
+            var i = (c << hshift) ^ ent; // xor hashing
+            if (htab[i] == fcode) {
+                ent = codetab[i];
+            } else {
+                if (htab[i] >= 0) { //  non-empty slot
+                    var disp = i - htab_size; // secondary hash (after G. Knott)
+                    if (disp == 0) disp = 1;
+                    do {
+                        i -= disp;
+                        if (i < 0) i += htab_size;
+                        if (htab[i] == fcode) {
+                            ent = codetab[i];
+                            break;
+                        }
+                    } while (htab[i] >= 0);
+                }
+                if (htab[i] < 0) { // empty slot
+                    output(ent);
+                    ent = c;
+                    if (free_ent < maxmaxcode) {
+                        codetab[i] = free_ent++; // code -> hash table
+                        htab[i] = fcode;
+                    } else {
+                        cl_block();
+                    }
+                }
+            }
+        }
+        output(ent);
+        output(EOFCode);
+    };
+
+    this.init = function() {
+        ClearCode = 1 << (initCodeSize - 1);
+        EOFCode = ClearCode + 1;
+        free_ent = ClearCode + 2;
+        a_count = 0;
+        char_init();
+    };
+    this.init();
+};
+
+// NeuQuant.js - Quantization to reduce image colors for GIF
+var NeuQuant = function(pixels, samplefac) {
+    var network = [];
+    var netindex = new Int32Array(256);
+    var bias = new Int32Array(256);
+    var freq = new Int32Array(256);
+    var radpower = new Int32Array(32);
+    var palette = []; // final palette
+
+    var alphadec = 30; // biased LSB for alpha value
+    var gamma = 1024; // BITS for gamma, can be changed by user
+    var beta = 1 / 1024; // beta used for decreasing radius
+    var betagamma = beta * gamma;
+
+    var initrad = 32; // for 256 colors: initrad = 32;
+    var initcycles = 100; // initcycles = 100
+
+    var maxnetpos = 255;
+    var netbiasshift = 16;
+    var ncycles; // no. of learning cycles
+
+    function init() {
+        for (var i = 0; i < 256; i++) {
+            var v = (i << (netbiasshift + 8)) / 256;
+            network[i] = new Float64Array([v, v, v, 0]);
+            freq[i] = gamma / 256;
+            bias[i] = 0;
+        }
+    }
+
+    function unbiasnetwork() {
+        for (var i = 0; i < 256; i++) {
+            network[i][0] >>= netbiasshift;
+            network[i][1] >>= netbiasshift;
+            network[i][2] >>= netbiasshift;
+            network[i][3] >>= netbiasshift;
+        }
+    }
+
+    function buildRGBPalette() {
+        var colorIndex = 0;
+        for (var i = 0; i < 256; i++) {
+            palette[colorIndex++] = Math.min(255, Math.max(0, Math.floor(network[i][0])));
+            palette[colorIndex++] = Math.min(255, Math.max(0, Math.floor(network[i][1])));
+            palette[colorIndex++] = Math.min(255, Math.max(0, Math.floor(network[i][2])));
+        }
+    }
+
+    function quantize() {
+        init();
+        learn();
+        unbiasnetwork();
+        buildRGBPalette();
+    }
+
+    function learn() {
+        var lengthcount = pixels.length;
+        var alpha = initrad;
+        var rad = alpha >> 3;
+        if (rad <= 1) rad = 0;
+        for (var i = 0; i < rad; i++) radpower[i] = alphadec * (((rad * rad - i * i) * gamma) / (rad * rad));
+        var step = 0;
+        var samplepixels = pixels;
+        var delta = lengthcount / (ncycles = initcycles);
+        var i = 0;
+        while (i < ncycles) {
+            var p = samplepixels[step];
+            var b = (p & 0xFF);
+            var g = (p >> 8) & 0xFF;
+            var r = (p >> 16) & 0xFF;
+            var j = contest(r, g, b);
+            alter(j, r, g, b, alpha);
+            if (rad > 0) alterneigh(rad, j, r, g, b, alpha);
+            step += samplefac;
+            if (step >= lengthcount) step -= lengthcount;
+            if (delta == 0) delta = 1;
+            if (++i % delta == 0) {
+                alpha -= alphadec;
+                rad = alpha >> 3;
+                if (rad <= 1) rad = 0;
+                for (j = 0; j < rad; j++) radpower[j] = alphadec * (((rad * rad - j * j) * gamma) / (rad * rad));
+            }
+        }
+    }
+
+    function alter(alpha, r, g, b, factor) {
+        var n = network[alpha];
+        n[0] -= ((n[0] - r) * factor) / gamma;
+        n[1] -= ((n[1] - g) * factor) / gamma;
+        n[2] -= ((n[2] - b) * factor) / gamma;
+    }
+
+    function alterneigh(rad, i, r, g, b, factor) {
+        var lo = i - rad;
+        var hi = i + rad;
+        if (lo < -1) lo = -1;
+        if (hi > 256) hi = 256;
+        for (var j = lo; j < hi; j++) {
+            if (j == i) continue;
+            var k = netindex[j];
+            var f = radpower[Math.abs(j - i)];
+            alter(k, r, g, b, f);
+        }
+    }
+
+    function contest(r, g, b) {
+        var bestd = ~(1 << 31);
+        var bestbiasd = bestd;
+        var bestpos = -1;
+        var bestbiaspos = -1;
+        for (var i = 0; i < 256; i++) {
+            var n = network[i];
+            var d = Math.abs(n[0] - r) + Math.abs(n[1] - g) + Math.abs(n[2] - b);
+            if (d < bestd) {
+                bestd = d;
+                bestpos = i;
+            }
+            var biasd = d - ((bias[i]) >> (netbiasshift - 8));
+            if (biasd < bestbiasd) {
+                bestbiasd = biasd;
+                bestbiaspos = i;
+            }
+            var betafreq = freq[i] >> 10;
+            freq[i] -= betafreq;
+            bias[i] += (betafreq << netbiasshift);
+        }
+        freq[bestpos] += gamma;
+        bias[bestpos] -= (betagamma);
+        return bestpos;
+    }
+
+    this.getPalette = function() { return palette; };
+    this.process = function() { quantize(); };
+};
+
+// GIFEncoder.js - Main GIF File Writer
+var GIFEncoder = function(width, height) {
+    var stream = new ByteArray();
+    var width = width;
+    var height = height;
+    var transparent = null;
+    var transIndex = 0;
+    var repeat = -1; // -1: no repeat, 0: forever
+    var delay = 0; // frame delay in hundreths of sec
+    var started = false;
+    var colorDepth;
+    var palSize;
+    var usedEntry = new Array(256);
+    var indexedPixels = null;
+    var palletes = null;
+    var pixels = null;
+    var firstFrame = true;
+    var sample = 10; // default sample interval for quantization
+
+    function ByteArray() {
+        this.array = [];
+        this.ptr = 0;
+        this.writeByte = function(val) {
+            this.array[this.ptr++] = val;
+        };
+        this.writeBytes = function(arr, off, len) {
+            for (var i = 0; i < len; i++) {
+                this.array[this.ptr++] = arr[off + i];
+            }
+        };
+        this.writeString = function(s) {
+            for (var i = 0; i < s.length; i++) {
+                this.writeByte(s.charCodeAt(i));
+            }
+        };
+        this.getData = function() {
+            return new Uint8Array(this.array);
+        };
+    }
+
+    function writeLSD() {
+        writeWord(width);
+        writeWord(height);
+        stream.writeByte((0x80 | 0x70) | palSize); // 1000 0000 -> GCT flag, size
+        stream.writeByte(0); // background color index
+        stream.writeByte(0); // pixel aspect ratio
+    }
+
+    function writePalette() {
+        stream.writeBytes(palletes, 0, palletes.length);
+        var n = (3 * 256) - palletes.length;
+        for (var i = 0; i < n; i++) stream.writeByte(0);
+    }
+
+    function writeNetscapeExt() {
+        stream.writeByte(0x21); // extension introducer
+        stream.writeByte(0xFF); // app extension label
+        stream.writeByte(11); // block size
+        stream.writeString("NETSCAPE2.0");
+        stream.writeByte(3); // sub-block size
+        stream.writeByte(1); // loop sub-block id
+        writeWord(repeat);
+        stream.writeByte(0); // block terminator
+    }
+
+    function writeGraphicCtrlExt() {
+        stream.writeByte(0x21); // extension introducer
+        stream.writeByte(0xF9); // graphic control label
+        stream.writeByte(4); // block size
+        stream.writeByte(0x04); // transparent color flag + user input flag + dispose method
+        writeWord(delay);
+        stream.writeByte(transIndex); // transparent color index
+        stream.writeByte(0); // block terminator
+    }
+
+    function writeImageDesc() {
+        stream.writeByte(0x2C); // image separator
+        writeWord(0); // image position x
+        writeWord(0); // image position y
+        writeWord(width);
+        writeWord(height);
+        stream.writeByte(0); // no LCT, LCT size
+    }
+
+    function writePixels() {
+        var enc = new LZWEncoder(width, height, indexedPixels, colorDepth);
+        enc.encode(stream);
+    }
+
+    function writeWord(w) {
+        stream.writeByte(w & 0xFF);
+        stream.writeByte((w >> 8) & 0xFF);
+    }
+
+    this.start = function() {
+        stream.writeString("GIF89a");
+        started = true;
+        return true;
+    };
+
+    this.addFrame = function(imageData) {
+        if (!started) return false;
+        pixels = imageData.data;
+        if (imageData.width != width || imageData.height != height) return false;
+        
+        var nq = new NeuQuant(pixels, sample);
+        nq.process();
+        palletes = nq.getPalette();
+        indexedPixels = new Uint8Array(imageData.width * imageData.height);
+        var k = 0;
+        for (var j = 0; j < imageData.height; j++) {
+            for (var i = 0; i < imageData.width; i++) {
+                var index = nq.contest(pixels[k + 0], pixels[k + 1], pixels[k + 2]);
+                indexedPixels[j * imageData.width + i] = index;
+                k += 4;
+            }
+        }
+        
+        if (firstFrame) {
+            writeLSD();
+            writePalette();
+            if (repeat >= 0) writeNetscapeExt();
+        }
+        writeGraphicCtrlExt();
+        writeImageDesc();
+        writePixels();
+        firstFrame = false;
+        return true;
+    };
+
+    this.finish = function() {
+        stream.writeByte(0x3B); // GIF trailer
+        return true;
+    };
+
+    this.setDelay = function(ms) {
+        delay = Math.round(ms / 10);
+    };
+    this.setRepeat = function(iter) {
+        repeat = iter;
+    };
+    this.setTransparent = function(c) {
+        transparent = c;
+    };
+    this.setSample = function(s) {
+        sample = s;
+    };
+    this.get = function() {
+        return stream.getData();
+    };
+};
+// =========================================================================
+// End of embedded GIF libraries
+// =========================================================================
+
+
+// --- メインのアプリケーションロジック ---
+const fileInput = document.getElementById('file-input');
+const dropArea = document.getElementById('drop-area');
+
+dropArea.onclick = () => fileInput.click();
+dropArea.ondragover = (e) => { e.preventDefault(); };
+dropArea.ondrop = (e) => { e.preventDefault(); handleFile(e.dataTransfer.files[0]); };
+fileInput.onchange = (e) => handleFile(e.target.files[0]);
+
+async function handleFile(file) {
+    if (!file) return;
+    document.getElementById('input-section').classList.add('hidden');
+    document.getElementById('process-section').classList.remove('hidden');
+    const status = document.getElementById('status');
+    const prog = document.getElementById('progress');
+
+    status.textContent = "画像を読み込み中...";
+    prog.value = 10;
+
+    const img = new Image();
+    const reader = new FileReader();
+
+    reader.onload = (e) => {
+        img.onload = async () => {
+            status.textContent = "画像サイズを調整中...";
+            prog.value = 30;
+
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Xの推奨サイズ（最大2000px程度）に制限
+            const MAX_DIMENSION = 2000; 
+            let width = img.width;
+            let height = img.height;
+
+            if (width > MAX_DIMENSION || height > MAX_DIMENSION) {
+                if (width > height) {
+                    height = Math.round(height * (MAX_DIMENSION / width));
+                    width = MAX_DIMENSION;
+                } else {
+                    width = Math.round(width * (MAX_DIMENSION / height));
+                    height = MAX_DIMENSION;
+                }
+            }
+
+            canvas.width = width;
+            canvas.height = height;
+            ctx.drawImage(img, 0, 0, width, height);
+
+            status.textContent = "アニメーションGIFを生成中... (PC負荷高)";
+            prog.value = 60;
+
+            // GIFEncoderの初期化
+            const encoder = new GIFEncoder(width, height);
+            encoder.setRepeat(0); // 0 = forever loop
+            encoder.setDelay(100); // 100ms per frame (0.1秒)
+
+            encoder.start();
+            encoder.addFrame(ctx.getImageData(0, 0, width, height)); // 1フレーム目
+            // ここでほんの少しだけ画像を変化させる（AI対策）
+            // 例: 1ピクセルだけ色を変える、透明度を変えるなど
+            // 今回は同じ画像をもう一度追加することで「アニメーション」と認識させる
+            encoder.addFrame(ctx.getImageData(0, 0, width, height)); // 2フレーム目
+            encoder.finish();
+
+            prog.value = 100;
+            status.textContent = "完了！";
+
+            const gifBlob = new Blob([encoder.get()], { type: 'image/gif' });
+            const url = URL.createObjectURL(gifBlob);
+
+            document.getElementById('preview').src = url;
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `animation_protected_${file.name.split('.')[0]}.gif`;
+            a.className = "btn";
+            a.textContent = "アニメーションGIFを保存";
+            
+            document.getElementById('download-container').innerHTML = ''; // クリア
+            document.getElementById('download-container').appendChild(a);
+            
+            document.getElementById('process-section').classList.add('hidden');
+            document.getElementById('result-area').classList.remove('hidden');
+
+        };
+        img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+}
+</script>
+</body>
+</html>
